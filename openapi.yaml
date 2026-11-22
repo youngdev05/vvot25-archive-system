@@ -1,0 +1,156 @@
+openapi: 3.0.0
+info:
+  title: Система архивирования
+  version: 1.0.0
+
+paths:
+  /tasks:
+    post:
+      operationId: createTask
+      summary: Поставить задание в очередь
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Task'
+      x-yc-apigateway-validator:
+        validateRequestBody: true
+      x-yc-apigateway-integration:
+        type: cloud_ymq
+        action: SendMessage
+        queue_url: '${queue_url}'
+        folder_id: '${folder_id}'
+        service_account_id: '${gateway_account_id}'
+      responses:
+        '200':
+          description: Успешное выполнение SendMessage преобразуется в 202.
+          x-yc-status-mapping: 202
+        '202':
+          description: Задание принято в очередь.
+        '400':
+          description: Некорректное задание.
+
+  /archives:
+    get:
+      operationId: listArchives
+      summary: Получить список архивов
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: Scan
+        database: '${database_path}'
+        table_name: '${table_name}'
+        service_account_id: '${gateway_account_id}'
+      responses:
+        '200':
+          description: Список записей, возвращённых операцией Scan.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Archive'
+
+  /archives/{key}:
+    get:
+      operationId: getArchive
+      summary: Получить сведения об архиве
+      parameters:
+        - $ref: '#/components/parameters/ArchiveKey'
+      x-yc-apigateway-validator:
+        validateRequestParameters: true
+        validateResponseBody: true
+        validationErrorHandler:
+          statusCode: 404
+          x-yc-apigateway-integration:
+            type: dummy
+            http_code: 200
+            http_headers:
+              Content-Type: application/json
+            content:
+              application/json: '{"message":"Archive not found"}'
+      x-yc-apigateway-integration:
+        type: cloud_ydb
+        action: GetItem
+        database: '${database_path}'
+        table_name: '${table_name}'
+        key: '{"key":"{key}"}'
+        service_account_id: '${gateway_account_id}'
+      responses:
+        '200':
+          description: Сведения об архиве.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Archive'
+        '404':
+          description: Архив не найден.
+
+  /download/{key}:
+    get:
+      operationId: downloadArchive
+      summary: Скачать ZIP-архив
+      parameters:
+        - $ref: '#/components/parameters/ArchiveKey'
+      x-yc-apigateway-validator:
+        validateRequestParameters: true
+      x-yc-apigateway-integration:
+        type: object_storage
+        bucket: '${bucket_name}'
+        object: '{key}'
+        service_account_id: '${gateway_account_id}'
+      responses:
+        '200':
+          description: Содержимое ZIP-архива.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Некорректный формат ключа.
+        '404':
+          description: Архив не найден.
+
+components:
+  parameters:
+    ArchiveKey:
+      name: key
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+      example: 018fcd2b-7dd5-7e57-837d-640f6b38f9f8.zip
+  schemas:
+    Task:
+      type: object
+      additionalProperties: false
+      required: [name, url]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[^/\\:\x00-\x1F\x7F]*[^./\\:\s\x00-\x1F\x7F][^/\\:\x00-\x1F\x7F]*$'
+          example: document.pdf
+        url:
+          type: string
+          format: uri
+          maxLength: 4096
+          pattern: '^https?://[^/?#@\s\\]+([/?#][^\s\\]*)?$'
+          description: Публичный HTTP(S) URL файла размером до 2 400 000 байт.
+          example: https://example.com/document.pdf
+    Archive:
+      type: object
+      additionalProperties: false
+      required: [name, url, key]
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        key:
+          type: string
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.zip$'
